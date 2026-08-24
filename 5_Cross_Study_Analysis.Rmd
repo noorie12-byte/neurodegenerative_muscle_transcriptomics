@@ -1,0 +1,412 @@
+---
+title: "5_Cross_Study_Analysis"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Cross-study consistency and cross-disease comparison analysis.
+  Identifies robust genes (significant in 2+ datasets, concordant
+  direction) within each disease. Compares gene sets across ALS,
+  PD and VCP-myopathy using set intersection (UpSetR).
+  GO, KEGG and Hallmark pathway enrichment on shared ALS/PD genes.
+  Biomarker candidate prioritisation using weighted scoring
+  framework incorporating consistency, effect size, pathway
+  relevance, cross-disease evidence and tissue specificity.
+  Results saved to Consistency/, Pathway/ and Biomarkers/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+# ============================================================
+# LIBRARIES
+# ============================================================
+library(tidyverse)
+library(ggplot2)
+library(UpSetR)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(AnnotationDbi)
+
+dir.create("Consistency", showWarnings = FALSE)
+dir.create("Pathway",     showWarnings = FALSE)
+dir.create("Biomarkers",  showWarnings = FALSE)
+```
+
+```{r load_de_results}
+# ============================================================
+# LOAD ALL DE RESULTS
+# Standardised format: gene, log2FC, pvalue, padj,
+#                      dataset, disease
+# Excludes GSE100188 (small RNA — separate track)
+# ============================================================
+
+de_files <- list.files(
+  "DE_Results",
+  pattern    = "_DE_results.csv",
+  full.names = TRUE
+)
+
+# exclude small RNA dataset from main analysis
+de_files <- de_files[!grepl("GSE100188", de_files)]
+
+all_de <- lapply(de_files, function(f){
+  df      <- read.csv(f, stringsAsFactors = FALSE)
+  df$gene <- as.character(df$gene)
+  df
+}) %>% bind_rows()
+
+cat("Datasets loaded:", unique(all_de$dataset), "\n")
+cat("Disease labels:", unique(all_de$disease), "\n")
+cat("Total gene-dataset combinations:", nrow(all_de), "\n")
+```
+
+```{r consistency_analysis}
+# ============================================================
+# CROSS-STUDY CONSISTENCY ANALYSIS
+# For each disease:
+#   - Identify genes significant in 2+ datasets (padj < 0.05)
+#   - Require concordant direction across datasets
+#   - Save consistency results per disease
+# ============================================================
+
+diseases <- c("ALS", "PD", "VCP_myopathy", "AD")
+
+consistency_results <- list()
+
+for(dis in diseases){
+  cat("\n--- Consistency:", dis, "---\n")
+
+  dis_data <- all_de %>% filter(disease == dis)
+
+  if(nrow(dis_data) == 0){
+    cat("No data for", dis, "\n")
+    next
+  }
+
+  # count datasets per gene and direction consistency
+  gene_summary <- dis_data %>%
+    group_by(gene) %>%
+    summarise(
+      n_datasets_total  = n(),
+      n_datasets_sig    = sum(padj < 0.05, na.rm = TRUE),
+      n_up              = sum(padj < 0.05 & log2FC > 0, na.rm = TRUE),
+      n_down            = sum(padj < 0.05 & log2FC < 0, na.rm = TRUE),
+      mean_log2FC       = mean(log2FC, na.rm = TRUE),
+      mean_abs_log2FC   = mean(abs(log2FC), na.rm = TRUE),
+      .groups           = "drop"
+    ) %>%
+    mutate(
+      direction_consistent = (n_up == n_datasets_sig) |
+                             (n_down == n_datasets_sig),
+      robust = n_datasets_sig >= 2 & direction_consistent
+    )
+
+  robust_genes <- gene_summary %>% filter(robust)
+
+  cat("Total genes tested:", nrow(gene_summary), "\n")
+  cat("Significant in 1+ datasets:",
+      sum(gene_summary$n_datasets_sig >= 1), "\n")
+  cat("Robust genes (2+ datasets, consistent direction):",
+      nrow(robust_genes), "\n")
+
+  consistency_results[[dis]] <- gene_summary
+
+  write.csv(
+    gene_summary,
+    paste0("Consistency/", dis, "_consistency.csv"),
+    row.names = FALSE
+  )
+}
+```
+
+```{r cross_disease_comparison}
+# ============================================================
+# CROSS-DISEASE GENE SET COMPARISON
+# Compare significant gene sets across diseases
+# ALS/PD overlap at FDR < 0.05
+# VCP-myopathy: nominal p < 0.05 (underpowered — n=3 controls)
+# Direction concordant within each disease
+# Direction NOT required to match between diseases
+# ============================================================
+
+# significant genes per disease (padj < 0.05)
+als_sig <- all_de %>%
+  filter(disease == "ALS", padj < 0.05) %>%
+  pull(gene) %>% unique()
+
+pd_sig <- all_de %>%
+  filter(disease == "PD", padj < 0.05) %>%
+  pull(gene) %>% unique()
+
+# VCP-myopathy: nominal threshold (no FDR genes)
+vcp_sig <- all_de %>%
+  filter(disease == "VCP_myopathy", pvalue < 0.05) %>%
+  pull(gene) %>% unique()
+
+cat("ALS significant genes:", length(als_sig), "\n")
+cat("PD significant genes:", length(pd_sig), "\n")
+cat("VCP-myopathy nominal genes:", length(vcp_sig), "\n")
+
+# UpSet plot
+gene_list <- list(
+  ALS          = als_sig,
+  PD           = pd_sig,
+  VCP_myopathy = vcp_sig
+)
+
+png("Consistency/CrossDisease_UpSet.png",
+    width = 2400, height = 1800, res = 250)
+upset(
+  fromList(gene_list),
+  order.by  = "freq",
+  sets.bar.color = c("#D6604D", "#2166AC", "#4DAF4A"),
+  text.scale = 1.5
+)
+dev.off()
+
+cat("UpSet plot saved\n")
+
+# ALS/PD shared genes
+als_pd_shared <- intersect(als_sig, pd_sig)
+cat("ALS/PD shared genes (FDR < 0.05):", length(als_pd_shared), "\n")
+
+# direction check within each disease for shared genes
+als_direction <- all_de %>%
+  filter(disease == "ALS", gene %in% als_pd_shared, padj < 0.05) %>%
+  group_by(gene) %>%
+  summarise(als_log2FC = mean(log2FC, na.rm = TRUE), .groups = "drop")
+
+pd_direction <- all_de %>%
+  filter(disease == "PD", gene %in% als_pd_shared, padj < 0.05) %>%
+  group_by(gene) %>%
+  summarise(pd_log2FC = mean(log2FC, na.rm = TRUE), .groups = "drop")
+
+shared_direction <- als_direction %>%
+  left_join(pd_direction, by = "gene") %>%
+  mutate(
+    als_dir    = ifelse(als_log2FC > 0, "Up", "Down"),
+    pd_dir     = ifelse(pd_log2FC  > 0, "Up", "Down"),
+    concordant = als_dir == pd_dir
+  )
+
+cat("Same direction (concordant):",
+    sum(shared_direction$concordant, na.rm = TRUE), "\n")
+cat("Opposite direction:",
+    sum(!shared_direction$concordant, na.rm = TRUE), "\n")
+
+# binomial test for direction discordance
+n_opposite <- sum(!shared_direction$concordant, na.rm = TRUE)
+n_total    <- nrow(shared_direction)
+binom_test <- binom.test(n_opposite, n_total, p = 0.5)
+cat("Binomial test p-value:", binom_test$p.value, "\n")
+
+write.csv(shared_direction,
+          "Consistency/ALS_PD_shared_genes.csv",
+          row.names = FALSE)
+```
+
+```{r pathway_enrichment}
+# ============================================================
+# PATHWAY ENRICHMENT — SHARED ALS/PD GENES
+# GO biological process over-representation analysis
+# KEGG pathway enrichment
+# Hallmark gene set enrichment
+# Input: 43 shared ALS/PD genes (41 with GO annotations)
+# ============================================================
+
+shared_genes <- als_pd_shared
+
+cat("Input genes for enrichment:", length(shared_genes), "\n")
+
+# ------------------------------------------
+# GO ENRICHMENT
+# ------------------------------------------
+go_results <- enrichGO(
+  gene          = shared_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+go_simplified <- simplify(go_results, cutoff = 0.7,
+                           by = "p.adjust", select_fun = min)
+
+cat("GO terms (simplified):", nrow(go_simplified@result), "\n")
+
+# dotplot
+p_go <- dotplot(go_simplified, showCategory = 20) +
+  labs(title = "Shared ALS/PD Muscle Pathways (Simplified GO BP)")
+
+ggsave("Pathway/ALS_PD_shared_GO_simplified_dotplot.png",
+       plot = p_go, width = 10, height = 12, dpi = 300)
+
+write.csv(go_simplified@result,
+          "Pathway/ALS_PD_shared_GO_BP_simplified.csv",
+          row.names = FALSE)
+
+# ------------------------------------------
+# KEGG ENRICHMENT
+# ------------------------------------------
+entrez_ids <- mapIds(
+  org.Hs.eg.db,
+  keys      = shared_genes,
+  column    = "ENTREZID",
+  keytype   = "SYMBOL",
+  multiVals = "first"
+)
+entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+
+kegg_results <- enrichKEGG(
+  gene          = entrez_ids,
+  organism      = "hsa",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05
+)
+
+cat("KEGG pathways significant:", nrow(kegg_results@result), "\n")
+
+write.csv(kegg_results@result,
+          "Pathway/ALS_PD_shared_KEGG.csv",
+          row.names = FALSE)
+
+# ------------------------------------------
+# HALLMARK ENRICHMENT
+# ------------------------------------------
+hallmark_sets <- msigdbr(
+  species  = "Homo sapiens",
+  category = "H"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+hallmark_results <- enricher(
+  gene          = shared_genes,
+  TERM2GENE     = hallmark_sets,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05
+)
+
+cat("Hallmark gene sets significant:",
+    nrow(hallmark_results@result), "\n")
+
+write.csv(hallmark_results@result,
+          "Pathway/ALS_PD_shared_Hallmark.csv",
+          row.names = FALSE)
+```
+
+```{r biomarker_scoring}
+# ============================================================
+# BIOMARKER CANDIDATE PRIORITISATION
+# Weighted scoring framework — 5 criteria:
+#   1. Cross-study consistency (datasets significant x2)
+#   2. Mean absolute log2FC (effect size)
+#   3. Pathway relevance (in top GO term x3)
+#   4. Cross-disease evidence (in 3 diseases x4)
+#   5. Tissue specificity (5 - n non-ND comparators significant)
+#
+# Note: Specificity scores added after internal specificity
+# analysis in gse3307_specificity_test.Rmd
+# ============================================================
+
+# get consistency data for shared genes
+als_consistency <- read.csv(
+  "Consistency/ALS_consistency.csv",
+  stringsAsFactors = FALSE
+)
+
+pd_consistency <- read.csv(
+  "Consistency/PD_consistency.csv",
+  stringsAsFactors = FALSE
+)
+
+# build scoring table for shared genes
+shared_scored <- shared_direction %>%
+  left_join(
+    als_consistency %>%
+      dplyr::select(gene, n_datasets_sig,
+                    mean_abs_log2FC) %>%
+      rename(als_n_datasets   = n_datasets_sig,
+             als_mean_abs_lfc = mean_abs_log2FC),
+    by = "gene"
+  ) %>%
+  left_join(
+    pd_consistency %>%
+      dplyr::select(gene, n_datasets_sig) %>%
+      rename(pd_n_datasets = n_datasets_sig),
+    by = "gene"
+  ) %>%
+  mutate(
+    # criterion 1: cross-study consistency
+    consistency_score = (replace_na(als_n_datasets, 0) +
+                         replace_na(pd_n_datasets,  0)) * 2,
+
+    # criterion 2: effect size
+    effect_score = replace_na(als_mean_abs_lfc, 0),
+
+    # criterion 3: pathway relevance (x3)
+    # top GO term = skeletal muscle adaptation
+    top_go_genes  = go_simplified@result$geneID[1],
+    in_top_pathway = gene %in% strsplit(top_go_genes, "/")[[1]],
+    pathway_score  = as.integer(in_top_pathway) * 3,
+
+    # criterion 4: cross-disease evidence (x4)
+    # check nominal significance in VCP-myopathy
+    in_vcp = gene %in% vcp_sig,
+    cross_disease_score = as.integer(in_vcp) * 4,
+
+    # criterion 5: specificity added after specificity analysis
+    # placeholder — updated in gse3307_specificity_test.Rmd
+    specificity_score = NA_real_,
+
+    # base score (without specificity)
+    score_base = consistency_score + effect_score +
+                 pathway_score + cross_disease_score
+  )
+
+cat("Shared genes scored:", nrow(shared_scored), "\n")
+cat("Top candidates by base score:\n")
+print(shared_scored %>%
+        arrange(desc(score_base)) %>%
+        dplyr::select(gene, score_base, concordant) %>%
+        head(10))
+
+write.csv(shared_scored,
+          "Biomarkers/ALS_PD_shared_scored.csv",
+          row.names = FALSE)
+
+cat("\nBiomarker base scores saved.\n")
+cat("Run gse3307_specificity_test.Rmd to add specificity scores.\n")
+```
+
+```{r summary}
+# ============================================================
+# CROSS-STUDY ANALYSIS SUMMARY
+# ============================================================
+
+cat("\n=== CROSS-STUDY ANALYSIS SUMMARY ===\n")
+cat("ALS robust genes (2+ datasets, consistent direction):",
+    nrow(consistency_results[["ALS"]] %>% filter(robust)), "\n")
+cat("PD robust genes:",
+    nrow(consistency_results[["PD"]] %>% filter(robust)), "\n")
+cat("ALS/PD shared genes (FDR < 0.05):",
+    length(als_pd_shared), "\n")
+cat("  - Same direction:", sum(shared_direction$concordant), "\n")
+cat("  - Opposite direction:",
+    sum(!shared_direction$concordant), "\n")
+cat("  - Binomial test p:", round(binom_test$p.value, 3), "\n")
+cat("\nFiles saved:\n")
+cat("  Consistency/ALS_consistency.csv\n")
+cat("  Consistency/PD_consistency.csv\n")
+cat("  Consistency/CrossDisease_UpSet.png\n")
+cat("  Consistency/ALS_PD_shared_genes.csv\n")
+cat("  Pathway/ALS_PD_shared_GO_simplified_dotplot.png\n")
+cat("  Pathway/ALS_PD_shared_GO_BP_simplified.csv\n")
+cat("  Biomarkers/ALS_PD_shared_scored.csv\n")
+```

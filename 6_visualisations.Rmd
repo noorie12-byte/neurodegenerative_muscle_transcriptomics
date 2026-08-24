@@ -1,0 +1,158 @@
+---
+title: "6_Visualisations"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Volcano plots for all primary datasets showing differential
+  expression results. Points coloured by direction (Up/Down/NS)
+  based on padj < 0.05 only. Dashed lines at log2FC = +/-0.5
+  and -log10(0.05) are for visualisation only and do not
+  reflect filtering criteria. Top candidate genes labelled.
+  Plots saved to Volcano_Plots/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+
+dir.create("Volcano_Plots", showWarnings = FALSE)
+```
+
+```{r candidate_genes}
+# ============================================================
+# TOP CANDIDATE GENES TO LABEL ON VOLCANO PLOTS
+# From ALS/PD shared gene set and internal specificity analysis
+# ============================================================
+
+top_candidates <- c(
+  "MGST3", "RNASEL",                          # Tier 3
+  "FOSL1", "TPRG1", "PILRB", "ACSS1",        # Tier 2
+  "RFLNA", "SLC40A1", "B3GLCT", "PDE7A",     # Tier 2
+  "TNNC1", "MYH7", "TNNT1", "TNNI1",         # Tier 6
+  "SOCS3", "KCNN3", "TPM3", "PPP3CC", "PDLIM5" # Tier 5
+)
+```
+
+```{r volcano_function}
+# ============================================================
+# VOLCANO PLOT FUNCTION
+# Args:
+#   df       — DE results dataframe (gene, log2FC, pvalue, padj)
+#   gse_id   — dataset ID for title
+#   label_genes — genes to label on plot
+#   fc_cutoff   — log2FC threshold for dashed lines (vis only)
+# ============================================================
+
+make_volcano <- function(df, gse_id,
+                         label_genes = top_candidates,
+                         fc_cutoff   = 0.5){
+
+  # significance based on padj only — no log2FC filter
+  df <- df %>%
+    mutate(
+      sig = case_when(
+        padj < 0.05 & log2FC >  0 ~ "Up",
+        padj < 0.05 & log2FC <  0 ~ "Down",
+        TRUE                       ~ "NS"
+      ),
+      label = ifelse(gene %in% label_genes, gene, NA)
+    )
+
+  n_up   <- sum(df$sig == "Up",   na.rm = TRUE)
+  n_down <- sum(df$sig == "Down", na.rm = TRUE)
+
+  p <- ggplot(df, aes(x     = log2FC,
+                       y     = -log10(pvalue),
+                       colour = sig)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    geom_label_repel(
+      aes(label = label),
+      size         = 3.5,
+      max.overlaps = 20,
+      na.rm        = TRUE,
+      box.padding  = 0.3
+    ) +
+    scale_colour_manual(
+      values = c("Up"   = "#D6604D",
+                 "Down" = "#2166AC",
+                 "NS"   = "grey70"),
+      name   = "Direction"
+    ) +
+    geom_vline(xintercept = c(-fc_cutoff, fc_cutoff),
+               linetype   = "dashed",
+               colour     = "grey40") +
+    geom_hline(yintercept = -log10(0.05),
+               linetype   = "dashed",
+               colour     = "grey40") +
+    theme_bw(base_size = 14) +
+    labs(
+      title    = paste(gse_id, "Differential Expression"),
+      subtitle = paste0("Up: ", n_up, " | Down: ", n_down),
+      x        = "log2 Fold Change",
+      y        = "-log10(p-value)",
+      colour   = "Direction"
+    )
+
+  return(p)
+}
+```
+
+```{r generate_volcano_plots}
+# ============================================================
+# GENERATE VOLCANO PLOTS FOR ALL PRIMARY DATASETS
+# ============================================================
+
+datasets_to_plot <- c(
+  "GSE3307",   # ALS primary
+  "GSE140089", # PD primary
+  "GSE26276",  # ALS directional only
+  "GSE122261", # ALS cell line
+  "GSE128177", # PD shared cohort
+  "GSE30806",  # VCP-myopathy
+  "GSE12685",  # AD brain
+  "GSE28146"   # AD brain
+)
+
+for(gse_id in datasets_to_plot){
+  cat("Generating volcano:", gse_id, "\n")
+
+  try({
+    de_file <- paste0("DE_Results/", gse_id, "_DE_results.csv")
+
+    if(!file.exists(de_file)){
+      cat("DE results not found for:", gse_id, "\n")
+      next
+    }
+
+    df <- read.csv(de_file, stringsAsFactors = FALSE)
+
+    # check for required columns
+    if(!all(c("gene","log2FC","pvalue","padj") %in% colnames(df))){
+      cat("Missing columns in:", gse_id, "\n")
+      next
+    }
+
+    p <- make_volcano(df, gse_id)
+
+    ggsave(
+      filename = paste0("Volcano_Plots/", gse_id, "_volcano.png"),
+      plot     = p,
+      width    = 10,
+      height   = 8,
+      dpi      = 300
+    )
+
+    cat("Saved:", gse_id, "volcano plot\n")
+  })
+}
+
+cat("\nAll volcano plots saved to Volcano_Plots/\n")
+list.files("Volcano_Plots")
+```

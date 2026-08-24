@@ -1,0 +1,319 @@
+---
+title: "GSE3307_Specificity_Test"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Internal specificity analysis — tests whether the ALS skeletal
+  muscle transcriptional signature is specific to neurodegeneration
+  or reflects generic muscle disease responses. ALS samples from
+  GSE3307 compared against five non-neurodegenerative muscle
+  disease groups contained within the same dataset:
+    JDM (n=21), SPG (n=4), DMD (n=10), FSHD (n=15), AQM (n=5)
+  All 121 GSE3307 samples normalised together before comparison.
+  Candidates classified as: ALS-specific (0/5), partially specific
+  (1-2/5), or generic muscle disease (3-5/5).
+  Updated biomarker scores saved to Biomarkers/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+library(limma)
+library(tidyverse)
+library(ggplot2)
+library(hgu133a.db)
+library(AnnotationDbi)
+
+dir.create("Specificity", showWarnings = FALSE)
+```
+
+```{r load_full_gse3307}
+# ============================================================
+# LOAD FULL GSE3307 MATRIX (ALL 121 SAMPLES)
+# Includes ALS, NHM controls, and all disease comparators:
+# JDM, SPG, DMD, FSHD, AQM, BMD, Dysferlin, Calpain3,
+# EDMD, FKRP, Exercise, MalHyp
+# All 121 samples normalised TOGETHER before subsetting
+# ============================================================
+
+expr_full <- read.csv(
+  "raw_data/GSE3307_expression_matrix.csv",
+  row.names    = 1,
+  check.names  = FALSE
+)
+expr_full <- as.matrix(expr_full)
+mode(expr_full) <- "numeric"
+
+cat("Full GSE3307 dimensions:", dim(expr_full), "\n")
+
+# log2 transform + quantile normalise all 121 samples together
+expr_log  <- log2(expr_full + 1)
+expr_norm_full <- normalizeBetweenArrays(
+  expr_log, method = "quantile"
+)
+
+cat("Normalisation complete\n")
+```
+
+```{r load_gse3307_metadata}
+# ============================================================
+# LOAD FULL GSE3307 METADATA
+# Assign group labels from sample titles
+# ============================================================
+
+gse3307_1 <- getGEO(
+  filename = "GSE3307-GPL96_series_matrix.txt",
+  getGPL   = FALSE
+)
+pdata_3307 <- pData(gse3307_1)
+
+# assign group labels from title prefix
+pdata_3307$Group <- case_when(
+  grepl("END-ALS",          pdata_3307$title) ~ "ALS",
+  grepl("FSH-NHM|HUD-NHM", pdata_3307$title) ~ "Control",
+  grepl("HUD-BMD",          pdata_3307$title) ~ "Exclude_BMD",
+  grepl("YJD-JDM",          pdata_3307$title) ~ "JDM",
+  grepl("HSP-Spg4|HSP-Spg7",pdata_3307$title) ~ "SPG",
+  grepl("FSH-DMD|HUD-DMD",  pdata_3307$title) ~ "DMD",
+  grepl("FSH-FSHD",         pdata_3307$title) ~ "FSHD",
+  grepl("AQM",              pdata_3307$title) ~ "AQM",
+  TRUE ~ "Other"
+)
+
+cat("Full GSE3307 group breakdown:\n")
+table(pdata_3307$Group)
+```
+
+```{r als_top_candidates}
+# ============================================================
+# TOP ALS/PD CANDIDATE GENES TO TEST FOR SPECIFICITY
+# From cross-disease comparison (shared ALS/PD genes)
+# Plus ALS-robust genes from consistency analysis
+# ============================================================
+
+top_candidates <- c(
+  "FOSL1", "TPRG1", "PILRB", "ACSS1", "RFLNA",
+  "SLC40A1", "B3GLCT", "PDE7A",
+  "MGST3", "RNASEL",
+  "TNNC1", "MYH7", "TNNT1", "TNNI1", "MYOZ2",
+  "SOCS3", "KCNN3", "TPM3", "PPP3CC", "PDLIM5"
+)
+```
+
+```{r specificity_comparisons}
+# ============================================================
+# ALS VS EACH COMPARATOR — LIMMA
+# Five comparators: JDM, SPG, DMD, FSHD, AQM
+# Uses full normalised 121-sample matrix
+# ============================================================
+
+comparators <- c("JDM", "SPG", "DMD", "FSHD", "AQM")
+
+for(comp in comparators){
+  cat("\n--- ALS vs", comp, "---\n")
+
+  try({
+
+    comp_meta <- pdata_3307 %>%
+      filter(Group %in% c("ALS", comp))
+
+    cat("ALS:", sum(comp_meta$Group == "ALS"), "\n")
+    cat(comp, ":", sum(comp_meta$Group == comp), "\n")
+
+    if(sum(comp_meta$Group == comp) < 2){
+      cat("Too few comparator samples — skipping\n")
+      next
+    }
+
+    # subset full normalised matrix
+    comp_expr <- expr_norm_full[,
+      comp_meta$geo_accession[
+        comp_meta$geo_accession %in% colnames(expr_norm_full)]]
+
+    comp_meta <- comp_meta[
+      match(colnames(comp_expr), comp_meta$geo_accession),
+    ]
+
+    stopifnot(
+      identical(colnames(comp_expr), comp_meta$geo_accession)
+    )
+
+    group  <- factor(comp_meta$Group, levels = c(comp, "ALS"))
+    design <- model.matrix(~ group)
+    fit    <- lmFit(comp_expr, design)
+    fit    <- eBayes(fit)
+
+    res       <- topTable(fit, coef = 2,
+                          number = Inf, adjust.method = "BH")
+    res$probe <- rownames(res)
+
+    # map probes to gene symbols
+    symbols <- mapIds(
+      hgu133a.db,
+      keys      = res$probe,
+      column    = "SYMBOL",
+      keytype   = "PROBEID",
+      multiVals = "first"
+    )
+
+    res$gene <- symbols
+    res <- res %>%
+      filter(!is.na(gene)) %>%
+      group_by(gene) %>%
+      slice_min(order_by = adj.P.Val,
+                n = 1, with_ties = FALSE) %>%
+      ungroup()
+
+    sig <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+    cat("Significant genes (ALS vs", comp, "):", sig, "\n")
+
+    overlap <- res %>%
+      filter(adj.P.Val < 0.05 & gene %in% top_candidates)
+    cat("Top candidates also sig vs", comp, ":",
+        nrow(overlap), "/", length(top_candidates), "\n")
+
+    write.csv(
+      res %>% dplyr::select(gene, logFC, P.Value, adj.P.Val),
+      paste0("Specificity/ALS_vs_", comp, "_DE.csv"),
+      row.names = FALSE
+    )
+  })
+}
+```
+
+```{r specificity_summary}
+# ============================================================
+# SPECIFICITY SUMMARY
+# For each top candidate: count how many comparators
+# it was significant in (padj < 0.05)
+# Classify: ALS-specific (0), partially specific (1-2),
+#           generic muscle disease (3-5)
+# ============================================================
+
+als_vs_jdm  <- read.csv("Specificity/ALS_vs_JDM_DE.csv",
+                          stringsAsFactors = FALSE)
+als_vs_spg  <- read.csv("Specificity/ALS_vs_SPG_DE.csv",
+                          stringsAsFactors = FALSE)
+als_vs_dmd  <- read.csv("Specificity/ALS_vs_DMD_DE.csv",
+                          stringsAsFactors = FALSE)
+als_vs_fshd <- read.csv("Specificity/ALS_vs_FSHD_DE.csv",
+                          stringsAsFactors = FALSE)
+als_vs_aqm  <- read.csv("Specificity/ALS_vs_AQM_DE.csv",
+                          stringsAsFactors = FALSE)
+
+spec_data <- data.frame(
+  gene        = top_candidates,
+  sig_vs_JDM  = top_candidates %in%
+    filter(als_vs_jdm,  adj.P.Val < 0.05)$gene,
+  sig_vs_SPG  = top_candidates %in%
+    filter(als_vs_spg,  adj.P.Val < 0.05)$gene,
+  sig_vs_DMD  = top_candidates %in%
+    filter(als_vs_dmd,  adj.P.Val < 0.05)$gene,
+  sig_vs_FSHD = top_candidates %in%
+    filter(als_vs_fshd, adj.P.Val < 0.05)$gene,
+  sig_vs_AQM  = top_candidates %in%
+    filter(als_vs_aqm,  adj.P.Val < 0.05)$gene
+) %>%
+  mutate(
+    n_comparators = sig_vs_JDM + sig_vs_SPG + sig_vs_DMD +
+                    sig_vs_FSHD + sig_vs_AQM,
+    specificity_label = case_when(
+      n_comparators == 0 ~ "ALS-specific",
+      n_comparators <= 2 ~ "Partially specific",
+      n_comparators >= 3 ~ "Generic muscle disease"
+    ),
+    specificity_score = 5 - n_comparators
+  )
+
+cat("=== SPECIFICITY SUMMARY ===\n")
+print(spec_data %>%
+        dplyr::select(gene, n_comparators, specificity_label))
+
+write.csv(spec_data,
+          "Specificity/ALS_specificity_summary.csv",
+          row.names = FALSE)
+```
+
+```{r update_biomarker_scores}
+# ============================================================
+# UPDATE BIOMARKER SCORES WITH SPECIFICITY
+# Add specificity component to base scores from
+# 5_Cross_Study_Analysis.Rmd
+# Final score = base score + specificity score
+# ============================================================
+
+shared_scored <- read.csv(
+  "Biomarkers/ALS_PD_shared_scored.csv",
+  stringsAsFactors = FALSE
+)
+
+# join specificity scores
+shared_scored <- shared_scored %>%
+  left_join(
+    spec_data %>%
+      dplyr::select(gene, sig_vs_JDM, sig_vs_SPG,
+                    sig_vs_DMD, sig_vs_FSHD, sig_vs_AQM,
+                    n_comparators_sig = n_comparators,
+                    specificity_label, specificity_score),
+    by = "gene"
+  ) %>%
+  mutate(
+    score_updated = score_base + replace_na(specificity_score, 0)
+  ) %>%
+  arrange(desc(score_updated))
+
+cat("=== UPDATED TOP 15 BIOMARKER CANDIDATES ===\n")
+print(shared_scored %>%
+        dplyr::select(gene, score_updated,
+                      specificity_label, n_comparators_sig) %>%
+        head(15))
+
+write.csv(shared_scored,
+          "Biomarkers/ALS_PD_shared_scored_with_specificity.csv",
+          row.names = FALSE)
+```
+
+```{r final_tier_assignment}
+# ============================================================
+# FINAL BIOMARKER TIER ASSIGNMENT
+# Tier 1: pan-ND AND ALS-specific (0 comparators)
+# Tier 2: ALS-specific only (0 comparators, not pan-ND)
+# Tier 3: pan-ND, partially specific (1-2 comparators)
+# Tier 4: partially specific (1-2 comparators, not pan-ND)
+# Tier 5: pan-ND but generic (3-5 comparators)
+# Tier 6: generic muscle disease (3-5 comparators, not pan-ND)
+# ============================================================
+
+final_table <- shared_scored %>%
+  mutate(
+    in_three_diseases = !is.na(n_comparators_sig),
+    biomarker_tier = case_when(
+      specificity_label == "ALS-specific" &
+        in_three_diseases == TRUE  ~ "Tier 1: Pan-ND and ALS-specific",
+      specificity_label == "ALS-specific" &
+        in_three_diseases == FALSE ~ "Tier 2: ALS-specific only",
+      specificity_label == "Partially specific" &
+        in_three_diseases == TRUE  ~ "Tier 3: Pan-ND, partially specific",
+      specificity_label == "Partially specific" ~
+        "Tier 4: Partially specific",
+      specificity_label == "Generic muscle disease" &
+        in_three_diseases == TRUE  ~ "Tier 5: Pan-ND but generic",
+      TRUE ~ "Tier 6: Generic muscle disease"
+    )
+  ) %>%
+  arrange(biomarker_tier, desc(score_updated))
+
+cat("=== FINAL TIER SUMMARY ===\n")
+print(table(final_table$biomarker_tier))
+
+write.csv(final_table,
+          "Biomarkers/Final_Tiered_Biomarker_Candidates.csv",
+          row.names = FALSE)
+
+cat("\nAll specificity analysis complete.\n")
+cat("Files saved to Specificity/ and Biomarkers/\n")
+```

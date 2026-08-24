@@ -1,0 +1,373 @@
+---
+title: "4_Differential_Expression"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Differential expression analysis for all microarray and RNA-seq
+  datasets. Microarray: limma with empirical Bayes moderation.
+  RNA-seq: DESeq2 with negative binomial model.
+  Key corrections: GSE3307 uses corrected metadata (BMD removed),
+  GSE128177 uses age-matched OA (old adult) controls only.
+  Results saved to DE_Results/ in standardised format.
+  Significance threshold: padj < 0.05, no log2FC filter applied.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+# ============================================================
+# LIBRARIES
+# ============================================================
+library(limma)
+library(DESeq2)
+library(tidyverse)
+
+dir.create("DE_Results", showWarnings = FALSE)
+```
+
+```{r load_metadata}
+# ============================================================
+# LOAD METADATA
+# Master metadata for microarray datasets
+# Corrected GSE3307 metadata (BMD samples removed)
+# Age-stratified GSE128177 metadata (OA controls only)
+# ============================================================
+
+meta <- read.csv(
+  "metadata/Master_Sample_Metadata2.csv",
+  stringsAsFactors = FALSE
+)
+meta$Group     <- trimws(meta$Group)
+meta$Dataset   <- trimws(meta$Dataset)
+meta$Sample_ID <- trimws(meta$Sample_ID)
+
+# corrected GSE3307 metadata
+# 5 Becker MD samples removed from control group
+# leaves n=13 true NHM controls
+meta_3307_corrected <- read.csv(
+  "metadata/GSE3307_corrected_metadata.csv",
+  stringsAsFactors = FALSE
+)
+
+cat("Master metadata loaded:", nrow(meta), "samples\n")
+cat("GSE3307 corrected metadata:",
+    nrow(meta_3307_corrected), "samples\n")
+cat("GSE3307 ALS:", sum(meta_3307_corrected$Group == "ALS"), "\n")
+cat("GSE3307 Control:", sum(meta_3307_corrected$Group == "Control"), "\n")
+```
+
+```{r microarray_de}
+# ============================================================
+# MICROARRAY DIFFERENTIAL EXPRESSION — LIMMA
+# Datasets: GSE122261, GSE26276, GSE3307, GSE12685,
+#           GSE28146, GSE30806
+# Method: lmFit() + eBayes() + topTable()
+# Significance: padj < 0.05 (Benjamini-Hochberg)
+# No log2FC threshold applied
+# ============================================================
+
+microarray_datasets <- c(
+  "GSE122261", # ALS myotubes (cell line) — secondary
+  "GSE26276",  # ALS skeletal muscle — directional only (n=3 vs 2)
+  "GSE3307",   # ALS skeletal muscle — PRIMARY (corrected metadata)
+  "GSE12685",  # AD brain — non-muscle comparator
+  "GSE28146",  # AD brain — non-muscle comparator
+  "GSE30806"   # VCP/IBMPFD myopathy skeletal muscle
+)
+
+for(gse_id in microarray_datasets){
+  cat("\n=================================\n",
+      "DE Analysis:", gse_id,
+      "\n=================================\n")
+
+  try({
+
+    # load normalised matrix
+    expr <- read.csv(
+      paste0("Normalised_Data/", gse_id, "_normalised.csv"),
+      row.names    = 1,
+      check.names  = FALSE
+    )
+    expr <- as.matrix(expr)
+    mode(expr) <- "numeric"
+
+    # ------------------------------------------
+    # METADATA — GSE3307 uses corrected version
+    # all others use master metadata
+    # ------------------------------------------
+    if(gse_id == "GSE3307"){
+
+      # corrected metadata: BMD samples removed
+      # true NHM controls only (n=13)
+      dataset_meta <- meta_3307_corrected %>%
+        filter(Group %in% c("ALS", "Control"))
+
+      cat("Using corrected GSE3307 metadata (BMD removed)\n")
+      cat("ALS:", sum(dataset_meta$Group == "ALS"), "\n")
+      cat("Control:", sum(dataset_meta$Group == "Control"), "\n")
+
+      expr <- expr[, colnames(expr) %in% dataset_meta$Sample_ID]
+      dataset_meta <- dataset_meta[
+        match(colnames(expr), dataset_meta$Sample_ID),
+      ]
+
+      stopifnot(identical(colnames(expr), dataset_meta$Sample_ID))
+
+      group <- factor(dataset_meta$Group,
+                      levels = c("Control", "ALS"))
+
+    } else {
+
+      dataset_meta <- meta %>%
+        filter(Dataset == gse_id,
+               Group   != "Exclude") %>%
+        filter(Group %in% c("Disease", "Control",
+                            "ALS", "PD", "AD", "Dementia"))
+
+      expr <- expr[, colnames(expr) %in% dataset_meta$Sample_ID]
+      dataset_meta <- dataset_meta[
+        match(colnames(expr), dataset_meta$Sample_ID),
+      ]
+
+      stopifnot(identical(colnames(expr), dataset_meta$Sample_ID))
+
+      dataset_meta$Group_binary <- ifelse(
+        dataset_meta$Group %in% c("ALS","PD","AD","Dementia","Disease"),
+        "Disease", "Control"
+      )
+
+      cat("Disease:", sum(dataset_meta$Group_binary == "Disease"), "\n")
+      cat("Control:", sum(dataset_meta$Group_binary == "Control"), "\n")
+
+      group <- factor(dataset_meta$Group_binary,
+                      levels = c("Control", "Disease"))
+    }
+
+    # ------------------------------------------
+    # LIMMA DE
+    # ------------------------------------------
+    design <- model.matrix(~ group)
+    fit    <- lmFit(expr, design)
+    fit    <- eBayes(fit)
+
+    res       <- topTable(fit, coef = 2,
+                          number = Inf, adjust.method = "BH")
+    res$gene  <- rownames(res)
+
+    res$disease <- case_when(
+      gse_id %in% c("GSE122261", "GSE26276", "GSE3307") ~ "ALS",
+      gse_id %in% c("GSE12685",  "GSE28146")            ~ "AD",
+      gse_id == "GSE30806"                               ~ "VCP_myopathy",
+      TRUE ~ "Unknown"
+    )
+    res$dataset <- gse_id
+
+    res_standard <- res %>%
+      dplyr::select(
+        gene,
+        log2FC  = logFC,
+        pvalue  = P.Value,
+        padj    = adj.P.Val,
+        dataset,
+        disease
+      )
+
+    sig <- sum(res_standard$padj < 0.05, na.rm = TRUE)
+    cat("Significant genes (padj < 0.05):", sig, "\n")
+
+    write.csv(
+      res_standard,
+      paste0("DE_Results/", gse_id, "_DE_results.csv"),
+      row.names = FALSE
+    )
+    cat("Saved:", gse_id, "\n")
+
+  })
+}
+```
+
+```{r fix_gse128177_metadata}
+# ============================================================
+# FIX GSE128177 AGE-STRATIFIED METADATA
+# Rebuild from GEO series matrix to get age labels
+# OA = older adult controls (retained)
+# YA = young adult controls (excluded — age confound)
+# ============================================================
+
+gse_128177 <- getGEO(
+  filename = "raw_data/GSE128177_series_matrix.txt",
+  getGPL   = FALSE
+)
+pdata_128177 <- pData(gse_128177)
+
+meta_128177_oa <- data.frame(
+  Sample_ID = pdata_128177$geo_accession,
+  MM_ID     = pdata_128177$title,
+  Group_raw = pdata_128177[["group:ch1"]],
+  Age       = pdata_128177[["age:ch1"]],
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    Group = case_when(
+      Group_raw == "Parkinson_disease" ~ "PD",
+      Group_raw == "Old_adult"         ~ "Control_Old",
+      Group_raw == "Young_adult"       ~ "Control_Young",
+      TRUE ~ Group_raw
+    )
+  )
+
+cat("GSE128177 group breakdown:\n")
+table(meta_128177_oa$Group)
+
+write.csv(meta_128177_oa,
+          "metadata/GSE128177_OA_metadata.csv",
+          row.names = FALSE)
+cat("Saved GSE128177 age-stratified metadata\n")
+```
+
+```{r rnaseq_de}
+# ============================================================
+# RNA-SEQ DIFFERENTIAL EXPRESSION — DESEQ2
+# Datasets: GSE100188 (ALS small RNA), GSE140089 (PD),
+#           GSE128177 (PD, OA controls only)
+# Method: DESeq2 negative binomial model
+# GSE128177: paired OA controls only — age confound corrected
+# GSE100188: analysed separately, not combined with mRNA
+# ============================================================
+
+library(GEOquery)
+
+rnaseq_meta <- read.csv(
+  "metadata/RNAseq_Sample_Metadata.csv",
+  stringsAsFactors = FALSE
+)
+rnaseq_meta$Group     <- trimws(rnaseq_meta$Group)
+rnaseq_meta$Sample_ID <- trimws(rnaseq_meta$Sample_ID)
+rnaseq_meta$Dataset   <- trimws(rnaseq_meta$Dataset)
+
+meta_128177_oa <- read.csv(
+  "metadata/GSE128177_OA_metadata.csv",
+  stringsAsFactors = FALSE
+)
+
+rnaseq_datasets <- c("GSE100188", "GSE140089", "GSE128177")
+
+for(gse_id in rnaseq_datasets){
+  cat("\n=================================\n",
+      "DE Analysis:", gse_id,
+      "\n=================================\n")
+
+  try({
+
+    dds <- readRDS(paste0("QC/RNAseq/", gse_id, "_dds.rds"))
+    cat("Groups in dds:", levels(factor(dds$Group)), "\n")
+
+    # ------------------------------------------
+    # GSE128177: rebuild with OA controls only
+    # ------------------------------------------
+    if(gse_id == "GSE128177"){
+
+      counts_128177 <- counts(dds)
+
+      meta_128177_fixed <- meta_128177_oa %>%
+        filter(Group %in% c("PD", "Control_Old")) %>%
+        mutate(Group = ifelse(Group == "Control_Old",
+                              "Control", "PD"))
+
+      counts_128177 <- counts_128177[,
+        colnames(counts_128177) %in% meta_128177_fixed$Sample_ID]
+
+      meta_128177_fixed <- meta_128177_fixed[
+        match(colnames(counts_128177),
+              meta_128177_fixed$Sample_ID),
+      ]
+
+      stopifnot(identical(colnames(counts_128177),
+                          meta_128177_fixed$Sample_ID))
+
+      cat("Using OA controls only (age-confound corrected)\n")
+      cat("PD:", sum(meta_128177_fixed$Group == "PD"), "\n")
+      cat("Control:", sum(meta_128177_fixed$Group == "Control"), "\n")
+
+      dds <- DESeqDataSetFromMatrix(
+        countData = counts_128177,
+        colData   = meta_128177_fixed,
+        design    = ~ Group
+      )
+      dds$Group <- factor(dds$Group, levels = c("Control", "PD"))
+
+    } else {
+
+      dds$Group <- factor(
+        dds$Group,
+        levels = c("Control",
+                   ifelse(gse_id == "GSE100188", "ALS", "PD"))
+      )
+      dds$Group <- droplevels(dds$Group)
+    }
+
+    design(dds) <- ~ Group
+    dds         <- DESeq(dds)
+
+    disease_label <- ifelse(gse_id == "GSE100188", "ALS", "PD")
+
+    res <- results(
+      dds,
+      contrast = c("Group", disease_label, "Control"),
+      alpha    = 0.05
+    )
+
+    res_df         <- as.data.frame(res)
+    res_df$gene    <- rownames(res_df)
+    res_df$dataset <- gse_id
+    res_df$disease <- disease_label
+
+    res_standard <- res_df %>%
+      dplyr::select(
+        gene,
+        log2FC  = log2FoldChange,
+        pvalue,
+        padj,
+        dataset,
+        disease
+      )
+
+    sig <- sum(res_standard$padj < 0.05, na.rm = TRUE)
+    cat("Significant genes (padj < 0.05):", sig, "\n")
+
+    write.csv(
+      res_standard,
+      paste0("DE_Results/", gse_id, "_DE_results.csv"),
+      row.names = FALSE
+    )
+    cat("Saved:", gse_id, "\n")
+
+  })
+}
+```
+
+```{r standardise_filenames}
+# ============================================================
+# STANDARDISE FILE NAMES
+# Ensure all DE results use lowercase _DE_results.csv
+# ============================================================
+
+old_names <- list.files("DE_Results",
+                         pattern     = "_DE_Results.csv",
+                         full.names  = TRUE)
+
+if(length(old_names) > 0){
+  new_names <- gsub("_DE_Results.csv", "_DE_results.csv", old_names)
+  file.rename(old_names, new_names)
+  cat("Renamed", length(old_names), "files\n")
+} else {
+  cat("All files already consistently named\n")
+}
+
+cat("\nDE results files:\n")
+list.files("DE_Results")
+```

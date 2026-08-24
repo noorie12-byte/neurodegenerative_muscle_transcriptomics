@@ -1,0 +1,163 @@
+---
+title: "8_Hallmark_Pathways"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Hallmark gene set enrichment analysis using MSigDB Hallmark
+  collection (H category). Over-representation analysis applied
+  to shared ALS/PD genes and per-disease robust gene sets.
+  GSEA also run using Hallmark gene sets with full ranked lists.
+  Results saved to Hallmark/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+library(clusterProfiler)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(ggplot2)
+
+dir.create("Hallmark", showWarnings = FALSE)
+```
+
+```{r load_hallmark_genesets}
+# ============================================================
+# LOAD HALLMARK GENE SETS FROM MSIGDB
+# Category H = Hallmark gene sets
+# 50 curated gene sets representing well-defined biological
+# states or processes
+# ============================================================
+
+hallmark_sets <- msigdbr(
+  species  = "Homo sapiens",
+  category = "H"
+) %>%
+  dplyr::select(gs_name, gene_symbol)
+
+cat("Hallmark gene sets loaded:",
+    length(unique(hallmark_sets$gs_name)), "\n")
+```
+
+```{r hallmark_ora_shared_genes}
+# ============================================================
+# HALLMARK ORA — SHARED ALS/PD GENES
+# Over-representation analysis on the 43 shared genes
+# ============================================================
+
+shared_genes <- read.csv(
+  "Consistency/ALS_PD_shared_genes.csv",
+  stringsAsFactors = FALSE
+) %>% pull(gene)
+
+cat("Shared ALS/PD genes:", length(shared_genes), "\n")
+
+hallmark_shared <- enricher(
+  gene          = shared_genes,
+  TERM2GENE     = hallmark_sets,
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+if(!is.null(hallmark_shared) &&
+   nrow(hallmark_shared@result) > 0){
+
+  cat("Significant Hallmark terms (shared ALS/PD):",
+      nrow(hallmark_shared@result), "\n")
+  print(hallmark_shared@result %>%
+          dplyr::select(Description, GeneRatio, p.adjust) %>%
+          head(10))
+
+  p <- dotplot(hallmark_shared, showCategory = 20) +
+    labs(title = "Hallmark Enrichment — Shared ALS/PD Genes")
+
+  ggsave("Hallmark/ALS_PD_shared_Hallmark_dotplot.png",
+         plot = p, width = 10, height = 8, dpi = 300)
+
+  write.csv(hallmark_shared@result,
+            "Hallmark/ALS_PD_shared_Hallmark.csv",
+            row.names = FALSE)
+} else {
+  cat("No significant Hallmark terms for shared genes\n")
+}
+```
+
+```{r hallmark_gsea_per_dataset}
+# ============================================================
+# HALLMARK GSEA — PER DATASET
+# Full ranked gene lists used for GSEA with Hallmark sets
+# Key expected finding: MYOGENESIS in ALS/PD
+# ============================================================
+
+hallmark_gsea_datasets <- c(
+  "GSE3307",   # ALS primary
+  "GSE140089", # PD primary
+  "GSE128177"  # PD replication
+)
+
+for(gse_id in hallmark_gsea_datasets){
+  cat("\n--- Hallmark GSEA:", gse_id, "---\n")
+
+  try({
+    df <- read.csv(
+      paste0("DE_Results/", gse_id, "_DE_results.csv"),
+      stringsAsFactors = FALSE
+    )
+
+    # ranked gene list
+    ranked <- df %>%
+      filter(!is.na(log2FC), !is.na(pvalue)) %>%
+      mutate(rank = sign(log2FC) * -log10(pvalue + 1e-300)) %>%
+      arrange(desc(rank))
+
+    gene_list        <- ranked$rank
+    names(gene_list) <- ranked$gene
+
+    # GSEA with Hallmark
+    hallmark_gsea <- GSEA(
+      geneList      = gene_list,
+      TERM2GENE     = hallmark_sets,
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      verbose       = FALSE
+    )
+
+    if(nrow(hallmark_gsea@result) > 0){
+      cat("Significant Hallmark terms:",
+          nrow(hallmark_gsea@result), "\n")
+
+      p <- dotplot(hallmark_gsea,
+                   split        = ".sign",
+                   showCategory = 15) +
+        facet_grid(. ~ .sign) +
+        labs(title = paste(gse_id, "Hallmark GSEA"))
+
+      ggsave(
+        paste0("Hallmark/", gse_id, "_Hallmark_GSEA_dotplot.png"),
+        plot  = p,
+        width = 12,
+        height = 10,
+        dpi   = 300
+      )
+
+      write.csv(
+        hallmark_gsea@result,
+        paste0("Hallmark/", gse_id, "_Hallmark_GSEA.csv"),
+        row.names = FALSE
+      )
+    } else {
+      cat("No significant Hallmark terms for:", gse_id, "\n")
+    }
+  })
+}
+
+cat("\nHallmark analysis complete.\n")
+cat("Results saved to Hallmark/\n")
+list.files("Hallmark")
+```

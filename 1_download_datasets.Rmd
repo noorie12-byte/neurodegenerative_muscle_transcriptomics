@@ -1,0 +1,131 @@
+---
+title: "1_Download_Datasets"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Downloads raw transcriptomic datasets from GEO for integrative
+  analysis of skeletal muscle in neurodegenerative diseases (ALS,
+  PD, VCP/IBMPFD myopathy). Datasets are saved to raw_data/ for
+  downstream preprocessing.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+# ============================================================
+# LIBRARIES
+# ============================================================
+library(GEOquery)
+library(tidyverse)
+
+# create output directories
+dir.create("raw_data",       showWarnings = FALSE)
+dir.create("metadata",       showWarnings = FALSE)
+dir.create("clean_data",     showWarnings = FALSE)
+dir.create("clean_metadata", showWarnings = FALSE)
+```
+
+```{r download_microarray}
+# ============================================================
+# MICROARRAY DATASETS
+# Affymetrix CEL files downloaded from GEO
+# Datasets: GSE3307 (ALS), GSE26276 (ALS), GSE122261 (ALS),
+#           GSE12685 (AD brain), GSE28146 (AD brain),
+#           GSE30806 (VCP-myopathy)
+# ============================================================
+
+microarray_datasets <- c(
+  "GSE3307",   # ALS skeletal muscle — primary ALS dataset
+  "GSE26276",  # ALS skeletal muscle — directional evidence only
+  "GSE122261", # ALS myotubes (cell line) — secondary
+  "GSE12685",  # AD prefrontal cortex — brain comparator
+  "GSE28146",  # AD hippocampus — brain comparator
+  "GSE30806"   # VCP/IBMPFD myopathy skeletal muscle
+)
+
+for(gse_id in microarray_datasets){
+  cat("\n=================================\n",
+      "Downloading:", gse_id,
+      "\n=================================\n")
+  try({
+    getGEOSuppFiles(gse_id, baseDir = "raw_data/")
+    cat("Downloaded:", gse_id, "\n")
+  })
+}
+```
+
+```{r download_rnaseq}
+# ============================================================
+# RNA-SEQ DATASETS
+# Count matrices downloaded from GEO supplementary files
+# Datasets: GSE100188 (ALS small RNA), GSE140089 (PD),
+#           GSE128177 (PD shared cohort)
+# ============================================================
+
+rnaseq_datasets <- c(
+  "GSE100188", # ALS skeletal muscle — small RNA-seq
+  "GSE140089", # PD skeletal muscle — primary PD dataset
+  "GSE128177"  # PD skeletal muscle — shared cohort
+)
+
+for(gse_id in rnaseq_datasets){
+  cat("\n=================================\n",
+      "Downloading:", gse_id,
+      "\n=================================\n")
+  try({
+    getGEOSuppFiles(gse_id, baseDir = "raw_data/")
+    cat("Downloaded:", gse_id, "\n")
+  })
+}
+```
+
+```{r download_metadata}
+# ============================================================
+# DOWNLOAD SAMPLE METADATA
+# Pulls pData from GEO series matrix files for all datasets
+# Used to assign disease/control group labels
+# ============================================================
+
+all_datasets <- c(microarray_datasets, rnaseq_datasets)
+
+for(gse_id in all_datasets){
+  cat("\nPulling metadata for:", gse_id, "\n")
+  try({
+    gse <- getGEO(gse_id, GSEMatrix = TRUE, getGPL = FALSE)
+
+    # handle list or single object
+    if(is.list(gse)) gse <- gse[[1]]
+
+    pdata <- pData(gse)
+
+    write.csv(
+      pdata,
+      paste0("metadata/", gse_id, "_pdata.csv"),
+      row.names = TRUE
+    )
+
+    cat("Saved metadata for:", gse_id, "\n")
+    cat("Samples:", nrow(pdata), "\n")
+  })
+}
+
+cat("\nAll downloads complete.\n")
+cat("Check raw_data/ for expression files\n")
+cat("Check metadata/ for sample metadata\n")
+```
+
+```{r check_downloads}
+# ============================================================
+# VERIFY DOWNLOADS
+# ============================================================
+
+cat("Files in raw_data/:\n")
+list.files("raw_data", recursive = TRUE)
+
+cat("\nMetadata files saved:\n")
+list.files("metadata")
+```

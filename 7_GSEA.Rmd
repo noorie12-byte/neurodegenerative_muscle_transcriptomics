@@ -1,0 +1,163 @@
+---
+title: "7_GSEA"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Gene Set Enrichment Analysis (GSEA) using GO biological
+  process gene sets. Genes ranked by sign(log2FC) x -log10(pvalue)
+  to capture both direction and significance. Simplified output
+  removes redundant GO terms. Run on all primary datasets.
+  Results saved to GSEA/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(ggplot2)
+
+dir.create("GSEA", showWarnings = FALSE)
+```
+
+```{r gsea_function}
+# ============================================================
+# GSEA FUNCTION
+# Args:
+#   df      — DE results (gene, log2FC, pvalue)
+#   gse_id  — dataset ID for file naming and titles
+# Ranking: sign(log2FC) x -log10(pvalue + 1e-300)
+# Small constant added to avoid log(0) for very small p-values
+# ============================================================
+
+run_gsea <- function(df, gse_id){
+
+  cat("\n--- GSEA:", gse_id, "---\n")
+
+  # create ranked gene list
+  ranked <- df %>%
+    filter(!is.na(log2FC), !is.na(pvalue)) %>%
+    mutate(
+      rank = sign(log2FC) * -log10(pvalue + 1e-300)
+    ) %>%
+    arrange(desc(rank))
+
+  gene_list        <- ranked$rank
+  names(gene_list) <- ranked$gene
+
+  cat("Genes in ranked list:", length(gene_list), "\n")
+
+  # run GSEA
+  gsea_result <- gseGO(
+    geneList      = gene_list,
+    OrgDb         = org.Hs.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "BP",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    verbose       = FALSE
+  )
+
+  if(nrow(gsea_result@result) == 0){
+    cat("No significant GSEA terms for:", gse_id, "\n")
+    return(NULL)
+  }
+
+  # simplify
+  gsea_simplified <- simplify(
+    gsea_result,
+    cutoff      = 0.7,
+    by          = "p.adjust",
+    select_fun  = min
+  )
+
+  cat("Significant terms (simplified):",
+      nrow(gsea_simplified@result), "\n")
+
+  # split activated vs suppressed
+  activated  <- gsea_simplified@result %>%
+    filter(NES > 0) %>% arrange(p.adjust)
+  suppressed <- gsea_simplified@result %>%
+    filter(NES < 0) %>% arrange(p.adjust)
+
+  cat("Activated pathways:", nrow(activated), "\n")
+  cat("Suppressed pathways:", nrow(suppressed), "\n")
+
+  # dotplot
+  p <- dotplot(gsea_simplified,
+               split    = ".sign",
+               showCategory = 15) +
+    facet_grid(. ~ .sign) +
+    labs(title = paste(gse_id, "GSEA GO BP (Simplified)"))
+
+  ggsave(
+    filename = paste0("GSEA/", gse_id, "_GSEA_dotplot.png"),
+    plot     = p,
+    width    = 14,
+    height   = 12,
+    dpi      = 300
+  )
+
+  # save results
+  write.csv(
+    gsea_simplified@result,
+    paste0("GSEA/", gse_id, "_GSEA_GO.csv"),
+    row.names = FALSE
+  )
+
+  return(gsea_simplified@result)
+}
+```
+
+```{r run_gsea_all_datasets}
+# ============================================================
+# RUN GSEA ON ALL PRIMARY DATASETS
+# ============================================================
+
+gsea_datasets <- c(
+  "GSE3307",   # ALS primary — expect muscle contraction suppressed
+  "GSE140089", # PD primary — expect OXPHOS activated
+  "GSE128177", # PD shared cohort — replication check
+  "GSE122261", # ALS cell line
+  "GSE26276",  # ALS directional only
+  "GSE30806",  # VCP-myopathy
+  "GSE12685",  # AD brain
+  "GSE28146"   # AD brain
+)
+
+gsea_results <- list()
+
+for(gse_id in gsea_datasets){
+  try({
+    de_file <- paste0("DE_Results/", gse_id, "_DE_results.csv")
+
+    if(!file.exists(de_file)){
+      cat("DE results not found:", gse_id, "\n")
+      next
+    }
+
+    df <- read.csv(de_file, stringsAsFactors = FALSE)
+    gsea_results[[gse_id]] <- run_gsea(df, gse_id)
+  })
+}
+
+cat("\n=== GSEA SUMMARY ===\n")
+for(gse_id in names(gsea_results)){
+  if(!is.null(gsea_results[[gse_id]])){
+    n_act <- sum(gsea_results[[gse_id]]$NES > 0)
+    n_sup <- sum(gsea_results[[gse_id]]$NES < 0)
+    cat(gse_id, "— Activated:", n_act,
+        "| Suppressed:", n_sup, "\n")
+  }
+}
+
+cat("\nGSEA results saved to GSEA/\n")
+list.files("GSEA")
+```

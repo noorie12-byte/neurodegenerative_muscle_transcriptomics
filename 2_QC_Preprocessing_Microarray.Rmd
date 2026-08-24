@@ -1,0 +1,272 @@
+---
+title: "2_QC_Preprocessing_Microarray"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Quality control and normalisation of Affymetrix microarray
+  datasets. Raw CEL files are log2 transformed and quantile
+  normalised. QC plots (boxplots, PCA, density) generated
+  before and after normalisation. Probe IDs mapped to HGNC
+  gene symbols using platform-specific annotation packages.
+  Normalised matrices saved to Normalised_Data/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+# ============================================================
+# LIBRARIES
+# ============================================================
+library(limma)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+
+# platform-specific annotation packages
+# install with BiocManager::install() if needed
+library(hgu133a.db)        # GSE3307  (GPL96)
+library(hgu133plus2.db)    # GSE12685, GSE28146, GSE30806 (GPL570)
+library(hugene10sttranscriptcluster.db)  # GSE26276 (GPL6244)
+library(huex10sttranscriptcluster.db)   # GSE122261 (GPL5175)
+library(AnnotationDbi)
+
+# create output directories
+dir.create("QC",                   showWarnings = FALSE)
+dir.create("QC/Microarray",        showWarnings = FALSE)
+dir.create("Normalised_Data",      showWarnings = FALSE)
+```
+
+```{r load_metadata}
+# ============================================================
+# LOAD MASTER METADATA
+# Master_Sample_Metadata2.csv contains Sample_ID, Group,
+# Dataset columns for all microarray samples
+# Group values: ALS, PD, AD, Dementia, Control, Exclude
+# ============================================================
+
+meta <- read.csv(
+  "metadata/Master_Sample_Metadata2.csv",
+  stringsAsFactors = FALSE
+)
+
+meta$Group   <- trimws(meta$Group)
+meta$Dataset <- trimws(meta$Dataset)
+meta$Sample_ID <- trimws(meta$Sample_ID)
+
+cat("Metadata loaded:", nrow(meta), "samples\n")
+cat("Datasets:", unique(meta$Dataset), "\n")
+```
+
+```{r qc_normalisation_loop}
+# ============================================================
+# QC AND NORMALISATION LOOP
+# For each microarray dataset:
+#   1. Load raw expression matrix
+#   2. Filter to metadata samples
+#   3. Remove zero-variance genes
+#   4. Generate pre-normalisation QC plots
+#   5. Log2(x+1) transform
+#   6. Quantile normalise
+#   7. Generate post-normalisation QC plots
+#   8. Map probes to gene symbols
+#   9. Save normalised matrix
+# ============================================================
+
+microarray_datasets <- c(
+  "GSE3307",
+  "GSE26276",
+  "GSE122261",
+  "GSE12685",
+  "GSE28146",
+  "GSE30806"
+)
+
+# annotation package lookup per dataset
+annotation_packages <- list(
+  GSE3307   = "hgu133a.db",
+  GSE26276  = "hugene10sttranscriptcluster.db",
+  GSE122261 = "huex10sttranscriptcluster.db",
+  GSE12685  = "hgu133a.db",
+  GSE28146  = "hgu133plus2.db",
+  GSE30806  = "hgu133plus2.db"
+)
+
+for(gse_id in microarray_datasets){
+  cat("\n=================================\n",
+      "Processing:", gse_id,
+      "\n=================================\n")
+
+  try({
+
+    # ------------------------------------------
+    # LOAD RAW EXPRESSION MATRIX
+    # ------------------------------------------
+    expr <- read.csv(
+      paste0("raw_data/", gse_id, "_expression_matrix.csv"),
+      check.names = FALSE
+    )
+    rownames(expr) <- expr[, 1]
+    expr <- expr[, -1]
+    expr <- as.matrix(expr)
+    mode(expr) <- "numeric"
+
+    cat("Raw matrix dimensions:", dim(expr), "\n")
+    cat("Value range (raw):", range(expr, na.rm = TRUE), "\n")
+
+    # ------------------------------------------
+    # MATCH TO METADATA
+    # ------------------------------------------
+    dataset_meta <- meta %>%
+      filter(Dataset == gse_id,
+             Group   != "Exclude")
+
+    expr <- expr[, colnames(expr) %in% dataset_meta$Sample_ID]
+
+    dataset_meta <- dataset_meta[
+      match(colnames(expr), dataset_meta$Sample_ID),
+    ]
+
+    stopifnot(identical(colnames(expr), dataset_meta$Sample_ID))
+
+    cat("Samples after metadata match:", ncol(expr), "\n")
+
+    # ------------------------------------------
+    # REMOVE ZERO VARIANCE GENES
+    # ------------------------------------------
+    keep <- apply(expr, 1, var, na.rm = TRUE) > 0
+    expr <- expr[keep, ]
+    cat("Genes after variance filter:", nrow(expr), "\n")
+
+    # ------------------------------------------
+    # PRE-NORMALISATION BOXPLOT
+    # ------------------------------------------
+    png(
+      paste0("QC/Microarray/", gse_id, "_raw_boxplot.png"),
+      width = 4000, height = 2000, res = 250
+    )
+    par(mar = c(8, 4, 4, 2))
+    boxplot(
+      expr,
+      las      = 2,
+      cex.axis = 0.7,
+      main     = paste(gse_id, "Raw Data"),
+      ylab     = "Expression (raw)"
+    )
+    dev.off()
+
+    # ------------------------------------------
+    # LOG2 TRANSFORM + QUANTILE NORMALISE
+    # ------------------------------------------
+    expr_log  <- log2(expr + 1)
+    expr_norm <- normalizeBetweenArrays(expr_log, method = "quantile")
+
+    cat("Value range (normalised):", range(expr_norm, na.rm = TRUE), "\n")
+
+    # ------------------------------------------
+    # POST-NORMALISATION BOXPLOT
+    # ------------------------------------------
+    png(
+      paste0("Normalised_Data/", gse_id, "_normalised_boxplot.png"),
+      width = 4000, height = 2000, res = 250
+    )
+    par(mar = c(8, 4, 4, 2))
+    boxplot(
+      expr_norm,
+      las      = 2,
+      cex.axis = 0.7,
+      main     = paste(gse_id, "Normalised Data"),
+      ylab     = "Expression (log2)"
+    )
+    dev.off()
+
+    # ------------------------------------------
+    # PCA (post-normalisation)
+    # ------------------------------------------
+    gene_var      <- apply(expr_norm, 1, var, na.rm = TRUE)
+    expr_norm_pca <- expr_norm[gene_var > 0, ]
+
+    pca <- prcomp(t(expr_norm_pca), scale. = TRUE)
+
+    pca_df <- data.frame(
+      PC1    = pca$x[, 1],
+      PC2    = pca$x[, 2],
+      Group  = dataset_meta$Group,
+      Sample = dataset_meta$Sample_ID
+    )
+
+    pct_var <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 1)
+
+    p_pca <- ggplot(pca_df,
+                    aes(PC1, PC2, colour = Group, label = Sample)) +
+      geom_point(size = 6) +
+      geom_text(size = 4, vjust = -0.8) +
+      theme_bw(base_size = 14) +
+      labs(
+        title = paste(gse_id, "PCA (Normalised)"),
+        x     = paste0("PC1 (", pct_var[1], "%)"),
+        y     = paste0("PC2 (", pct_var[2], "%)")
+      )
+
+    ggsave(
+      filename = paste0("QC/Microarray/", gse_id, "_PCA.png"),
+      plot     = p_pca,
+      width    = 14,
+      height   = 10
+    )
+
+    # ------------------------------------------
+    # PROBE TO GENE SYMBOL MAPPING
+    # ------------------------------------------
+    ann_pkg <- annotation_packages[[gse_id]]
+
+    symbols <- mapIds(
+      get(ann_pkg),
+      keys      = rownames(expr_norm),
+      column    = "SYMBOL",
+      keytype   = "PROBEID",
+      multiVals = "first"
+    )
+
+    expr_norm_df        <- as.data.frame(expr_norm)
+    expr_norm_df$symbol <- symbols
+    expr_norm_df        <- expr_norm_df[!is.na(expr_norm_df$symbol), ]
+
+    # keep probe with lowest mean expression variance per gene
+    expr_norm_df$var <- apply(
+      expr_norm_df[, !names(expr_norm_df) %in% "symbol"],
+      1, var, na.rm = TRUE
+    )
+
+    expr_norm_df <- expr_norm_df %>%
+      group_by(symbol) %>%
+      slice_min(order_by = var, n = 1, with_ties = FALSE) %>%
+      ungroup()
+
+    rownames(expr_norm_df) <- expr_norm_df$symbol
+    expr_norm_final <- expr_norm_df %>%
+      dplyr::select(-symbol, -var) %>%
+      as.matrix()
+
+    cat("Genes after probe mapping:", nrow(expr_norm_final), "\n")
+
+    # ------------------------------------------
+    # SAVE NORMALISED MATRIX
+    # ------------------------------------------
+    write.csv(
+      expr_norm_final,
+      paste0("Normalised_Data/", gse_id, "_normalised.csv")
+    )
+
+    cat("Saved:", gse_id, "\n")
+
+  })
+}
+
+cat("\nMicroarray QC and normalisation complete.\n")
+cat("Normalised matrices saved to Normalised_Data/\n")
+cat("QC plots saved to QC/Microarray/\n")
+```

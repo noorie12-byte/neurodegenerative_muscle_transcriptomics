@@ -1,0 +1,250 @@
+---
+title: "13_Thesis_Figures"
+author: "noor ahmed"
+date: "2026-07-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r load_libraries}
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+
+dir.create("figures", showWarnings = FALSE)
+```
+
+```{r figure1_qc}
+# Figure 1 - QC boxplot and PCA
+# already saved in QC/Microarray/ - just copy to figures/
+file.copy("QC/Microarray/GSE3307_normalised_boxplot.png",
+          "figures/Figure1A_QC_boxplot.png", overwrite = TRUE)
+file.copy("QC/Microarray/GSE3307_normalised_PCA.png",
+          "figures/Figure1B_QC_PCA.png", overwrite = TRUE)
+cat("Figure 1 copied\n")
+```
+
+```{r figure2_volcano}
+# Figure 2 - Volcano plots
+# already saved - copy to figures/
+file.copy("Volcano_Plots/GSE3307_volcano.png",
+          "figures/Figure2A_volcano_ALS.png", overwrite = TRUE)
+file.copy("Volcano_Plots/GSE140089_volcano.png",
+          "figures/Figure2B_volcano_PD.png", overwrite = TRUE)
+cat("Figure 2 copied\n")
+```
+
+```{r figure3_upset}
+# Figure 3 - UpSet plot cross-disease overlap
+file.copy("Consistency/CrossDisease_UpSet.png",
+          "figures/Figure3_UpSet.png", overwrite = TRUE)
+cat("Figure 3 copied\n")
+```
+
+```{r figure4_go_dotplot}
+# Figure 4 - GO pathway dotplot
+file.copy("Pathway/ALS_PD_shared_GO_simplified_dotplot.png",
+          "figures/Figure4_GO_dotplot.png", overwrite = TRUE)
+cat("Figure 4 copied\n")
+```
+
+```{r figure5_gsea}
+# Figure 5 - GSEA dotplot
+file.copy("GSEA/GSE3307_GSEA_dotplot.png",
+          "figures/Figure5_GSEA.png", overwrite = TRUE)
+cat("Figure 5 copied\n")
+```
+
+```{r figure6_muscle_cns_heatmap}
+# Figure 6 - Muscle vs CNS heatmap
+# already generated in 12_CNS_Comparison.Rmd
+# if not there, re-run that chunk here
+file.copy("figures/Muscle_vs_CNS_heatmap.png",
+          "figures/Figure6_CNS_heatmap.png", overwrite = TRUE)
+cat("Figure 6 copied\n")
+```
+
+```{r figure7_muscle_cns_pattern}
+# Figure 7 - Muscle vs CNS pattern summary
+file.copy("figures/Muscle_vs_CNS_pattern_summary.png",
+          "figures/Figure7_CNS_pattern.png", overwrite = TRUE)
+cat("Figure 7 copied\n")
+```
+
+```{r figure8_biomarker_tiers}
+# Figure 8 - Biomarker tier summary
+final_table <- read.csv("Biomarkers/Final_Tiered_Biomarker_Candidates.csv",
+                         stringsAsFactors = FALSE)
+
+plot_data <- final_table %>%
+  head(20) %>%
+  mutate(
+    gene = factor(gene, levels = rev(gene)),
+    tier_short = case_when(
+      grepl("Tier 1", biomarker_tier) ~ "Tier 1: Pan-ND and ALS-specific",
+      grepl("Tier 2", biomarker_tier) ~ "Tier 2: ALS-specific",
+      grepl("Tier 3", biomarker_tier) ~ "Tier 3: Pan-ND, partially specific",
+      grepl("Tier 4", biomarker_tier) ~ "Tier 4: Partially specific",
+      grepl("Tier 5", biomarker_tier) ~ "Tier 5: Pan-ND but generic",
+      grepl("Tier 6", biomarker_tier) ~ "Tier 6: Generic muscle disease",
+      TRUE ~ biomarker_tier
+    )
+  )
+
+tier_colours <- c(
+  "Tier 1: Pan-ND and ALS-specific"    = "#A50026",
+  "Tier 2: ALS-specific"               = "#D6604D",
+  "Tier 3: Pan-ND, partially specific" = "#F4A582",
+  "Tier 4: Partially specific"         = "#92C5DE",
+  "Tier 5: Pan-ND but generic"         = "#4393C3",
+  "Tier 6: Generic muscle disease"     = "#2166AC"
+)
+
+p <- ggplot(plot_data, aes(x = score_updated, y = gene,
+                             fill = tier_short)) +
+  geom_bar(stat = "identity", colour = "white", linewidth = 0.3) +
+  geom_text(aes(label = round(score_updated, 1)),
+            hjust = -0.2, size = 3.5) +
+  scale_fill_manual(values = tier_colours, name = "Biomarker Tier") +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 9),
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = 10, face = "bold")
+  ) +
+  labs(
+    title = "Biomarker Candidate Prioritisation — Top 20 Genes",
+    subtitle = "Scored on consistency, effect size, pathway relevance,\ncross-disease evidence and specificity",
+    x = "Weighted Score",
+    y = "Gene"
+  ) +
+  xlim(0, max(plot_data$score_updated) * 1.15)
+
+ggsave("figures/Figure8_Biomarker_tiers.png",
+       plot = p, width = 10, height = 8, dpi = 300)
+
+cat("Figure 8 saved\n")
+```
+
+
+No genes reached Tier 1 — defined as candidates that were both nominally significant across all three diseases and ALS-specific relative to non-neurodegenerative muscle diseases. This indicates that no single gene simultaneously demonstrated pan-neurodegenerative relevance and neurodegeneration-specific expression, suggesting that cross-disease conservation and disease specificity represent competing rather than complementary properties in the skeletal muscle transcriptional response to neurodegeneration. The strongest candidates therefore represent a trade-off: MGST3 and RNASEL (Tier 3) show broader disease relevance across ALS, PD and VCP-myopathy but partial specificity, while the eight Tier 2 genes are ALS-specific but not conserved across diseases.
+
+
+Tier 1 — Pan-ND and ALS-specific
+Significant across multiple neurodegenerative diseases and not found in any other muscle disease — the strongest possible biomarker candidate.
+
+Tier 2 — ALS-specific only
+Significant in ALS but not in other muscle diseases — specific to ALS but not shared across neurodegeneration.
+
+Tier 3 — Pan-ND, partially specific
+Significant across multiple neurodegenerative diseases and found in only a few other muscle diseases — strong cross-disease candidates with reasonable specificity.
+
+Tier 4 — Partially specific
+Significant in one or two neurodegenerative diseases and found in a small number of other muscle diseases — moderate specificity.
+
+Tier 5 — Pan-ND but generic
+Significant across multiple neurodegenerative diseases but also found in many other muscle diseases — broad but not specific to neurodegeneration.
+
+Tier 6 — Generic muscle disease
+Significant in neurodegeneration but also found across most other muscle diseases — reflects general muscle pathology rather than neurodegeneration specifically.
+
+
+```{r check_all_figures}
+# confirm all 8 figures are present
+cat("All thesis figures:\n")
+list.files("figures", pattern = "Figure")
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+
+# load the comparator DE results
+als_vs_jdm  <- read.csv("Specificity/ALS_vs_JDM_DE.csv",  stringsAsFactors = FALSE)
+als_vs_spg  <- read.csv("Specificity/ALS_vs_SPG_DE.csv",  stringsAsFactors = FALSE)
+als_vs_dmd  <- read.csv("Specificity/ALS_vs_DMD_DE.csv",  stringsAsFactors = FALSE)
+als_vs_fshd <- read.csv("Specificity/ALS_vs_FSHD_DE.csv", stringsAsFactors = FALSE)
+als_vs_aqm  <- read.csv("Specificity/ALS_vs_AQM_DE.csv",  stringsAsFactors = FALSE)
+
+top_genes <- c("FOSL1", "TPRG1", "PILRB", "ACSS1", "RFLNA",
+                "SLC40A1", "B3GLCT", "PDE7A", "MGST3", "RNASEL",
+                "TNNC1", "MYH7", "TNNT1", "TNNI1", "MYOZ2",
+                "SOCS3", "KCNN3", "TPM3", "PPP3CC", "PDLIM5")
+
+# build specificity matrix for top candidates
+spec_data <- data.frame(
+  gene        = top_genes,
+  sig_vs_JDM  = top_genes %in% filter(als_vs_jdm,  adj.P.Val < 0.05)$gene,
+  sig_vs_SPG  = top_genes %in% filter(als_vs_spg,  adj.P.Val < 0.05)$gene,
+  sig_vs_DMD  = top_genes %in% filter(als_vs_dmd,  adj.P.Val < 0.05)$gene,
+  sig_vs_FSHD = top_genes %in% filter(als_vs_fshd, adj.P.Val < 0.05)$gene,
+  sig_vs_AQM  = top_genes %in% filter(als_vs_aqm,  adj.P.Val < 0.05)$gene
+) %>%
+  mutate(
+    n_comparators = sig_vs_JDM + sig_vs_SPG + sig_vs_DMD +
+                    sig_vs_FSHD + sig_vs_AQM,
+    tier = case_when(
+      n_comparators == 0 ~ "ALS-specific (Tier 2)",
+      n_comparators <= 2 ~ "Partially specific (Tier 3/4)",
+      n_comparators >= 3 ~ "Generic muscle disease (Tier 5/6)"
+    )
+  )
+
+cat("Specificity breakdown:\n")
+print(spec_data %>% dplyr::select(gene, n_comparators, tier))
+
+# reshape for heatmap
+spec_long <- spec_data %>%
+  dplyr::select(gene, sig_vs_JDM, sig_vs_SPG,
+                sig_vs_DMD, sig_vs_FSHD, sig_vs_AQM) %>%
+  pivot_longer(-gene,
+               names_to  = "comparator",
+               values_to = "significant") %>%
+  mutate(
+    comparator = gsub("sig_vs_", "", comparator),
+    gene = factor(gene, levels = rev(top_genes))
+  )
+
+# add tier annotation for gene labels
+tier_labels <- spec_data %>%
+  dplyr::select(gene, tier) %>%
+  mutate(gene = factor(gene, levels = rev(top_genes)))
+
+p <- ggplot(spec_long, aes(x = comparator, y = gene,
+                             fill = significant)) +
+  geom_tile(colour = "white", linewidth = 0.8) +
+  scale_fill_manual(
+    values = c("TRUE"  = "#D6604D",
+               "FALSE" = "#F7F7F7"),
+    labels = c("TRUE"  = "Significant (padj < 0.05)",
+               "FALSE" = "Not significant"),
+    name = ""
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid    = element_blank(),
+    axis.text.x   = element_text(size = 11, face = "bold"),
+    axis.text.y   = element_text(size = 10),
+    legend.position = "bottom",
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(size = 10, colour = "grey40")
+  ) +
+  labs(
+    title    = "ALS Biomarker Candidate Specificity",
+    subtitle = "Red = also significant when ALS compared against non-neurodegenerative muscle disease",
+    x        = "Muscle disease comparator",
+    y        = "Gene"
+  )
+
+ggsave("figures/Figure10_Specificity_heatmap.png",
+       plot = p, width = 8, height = 10, dpi = 300)
+
+cat("Figure 10 saved\n")
+```
+

@@ -1,0 +1,491 @@
+---
+title: "9_Brain_vs_Muscle_Comparison"
+author: "Noor-Ul-Haya Ahmed"
+date: "2026"
+output: pdf_document
+description: >
+  Comparison of skeletal muscle transcriptional signatures against
+  CNS transcriptomic datasets from the same diseases.
+  CNS datasets: GSE26927 (multi-disease post-mortem CNS covering
+  ALS spinal cord, PD substantia nigra, AD entorhinal cortex)
+  and GSE122649 (ALS motor cortex RNA-seq).
+  Top muscle candidate genes assessed for dysregulation in CNS.
+  59 of 60 gene-tissue comparisons classified as muscle-specific.
+  Results saved to CNS_Data/.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "...") # make own directory
+```
+
+```{r libraries}
+library(limma)
+library(DESeq2)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(GEOquery)
+
+dir.create("CNS_Data",            showWarnings = FALSE)
+dir.create("CNS_Data/DE_Results", showWarnings = FALSE,
+           recursive = TRUE)
+```
+
+```{r candidate_genes}
+# ============================================================
+# TOP MUSCLE CANDIDATE GENES TO CHECK IN CNS
+# From tiered biomarker framework (Tiers 2-6)
+# ============================================================
+
+all_candidates <- c(
+  "FOSL1", "TPRG1", "PILRB", "ACSS1", "RFLNA",    # Tier 2
+  "SLC40A1", "B3GLCT", "PDE7A",                     # Tier 2
+  "MGST3", "RNASEL",                                 # Tier 3
+  "TNNC1", "MYH7", "TNNT1", "TNNI1", "MYOZ2",      # Tier 6
+  "SOCS3", "KCNN3", "TPM3", "PPP3CC", "PDLIM5"     # Tier 5
+)
+```
+
+```{r load_gse26927_metadata}
+# ============================================================
+# GSE26927 — MULTI-DISEASE POST-MORTEM CNS
+# Covers: ALS cervical spinal cord, PD substantia nigra,
+#         AD entorhinal cortex, HD caudate, MS frontal gyri
+# Platform: Illumina HumanRef-8 v2 (GPL6255)
+# n per disease: ALS 10 vs 10, PD 12 vs 8, AD 11 vs 7
+# ============================================================
+
+gse26927 <- getGEO(
+  filename = "CNS_Data/GSE26927_series_matrix.txt",
+  getGPL   = FALSE,
+  AnnotGPL = FALSE
+)
+pdata <- pData(gse26927)
+
+# assign group labels from sample title
+pdata$Group <- case_when(
+  grepl("_Control_", pdata$title) ~ "Control",
+  grepl("_Disease_", pdata$title) ~ "Disease",
+  TRUE ~ "Unknown"
+)
+pdata$Disease <- trimws(
+  gsub("disease: ", "", pdata$characteristics_ch1)
+)
+
+cat("GSE26927 sample breakdown:\n")
+print(table(pdata$source_name_ch1, pdata$Group))
+```
+
+```{r load_gse26927_expression}
+# ============================================================
+# LOAD AND NORMALISE GSE26927 EXPRESSION DATA
+# Non-normalised Illumina intensities
+# Negative values set to 0 (background subtraction artefact)
+# Log2(x+1) transform + quantile normalisation
+# ============================================================
+
+expr_cns <- read.delim(
+  "CNS_Data/GSE26927_non-normalized.txt",
+  row.names    = 1,
+  check.names  = FALSE
+)
+
+cat("Expression matrix dimensions:", dim(expr_cns), "\n")
+
+expr_cns <- as.matrix(expr_cns)
+mode(expr_cns) <- "numeric"
+
+# set negative values to 0
+cat("Negative values set to 0:",
+    sum(expr_cns < 0, na.rm = TRUE), "\n")
+expr_cns[expr_cns < 0] <- 0
+
+# log2 transform + quantile normalise
+expr_cns_log  <- log2(expr_cns + 1)
+expr_cns_log[is.na(expr_cns_log)] <- 0
+expr_cns_norm <- normalizeBetweenArrays(
+  expr_cns_log, method = "quantile"
+)
+
+# remove NA rownames
+expr_cns_norm <- expr_cns_norm[
+  !is.na(rownames(expr_cns_norm)),
+]
+expr_cns_norm <- expr_cns_norm[
+  rownames(expr_cns_norm) != "",
+]
+expr_cns_norm[is.na(expr_cns_norm)] <- 0
+
+cat("Normalisation complete\n")
+cat("Value range:", range(expr_cns_norm, na.rm = TRUE), "\n")
+cat("Overlap with metadata:",
+    sum(colnames(expr_cns_norm) %in% rownames(pdata)), "\n")
+```
+
+```{r load_gse26927_annotation}
+# ============================================================
+# GPL6255 PROBE ANNOTATION
+# Illumina HumanRef-8 v2 probe IDs mapped to gene symbols
+# Using downloaded GPL6255 SOFT annotation file
+# ============================================================
+
+gpl_lines  <- readLines(gzfile("GPL6255_family.soft"))
+start_line <- grep("^ID\t", gpl_lines)[1]
+
+gpl_table <- read.delim(
+  text = paste(gpl_lines[start_line:(length(gpl_lines) - 1)],
+               collapse = "\n"),
+  stringsAsFactors = FALSE
+)
+
+probe_to_symbol <- gpl_table %>%
+  dplyr::select(ID, SYMBOL) %>%
+  filter(!is.na(SYMBOL) & SYMBOL != "") %>%
+  distinct(ID, .keep_all = TRUE)
+
+cat("Probes with gene symbols:", nrow(probe_to_symbol), "\n")
+cat("Coverage of expression matrix:",
+    sum(rownames(expr_cns_norm) %in% probe_to_symbol$ID), "\n")
+```
+
+```{r gse26927_de_analysis}
+# ============================================================
+# DIFFERENTIAL EXPRESSION — GSE26927 CNS SUBSETS
+# Three tissue-specific analyses:
+#   ALS: cervical spinal cord (n=10 vs 10)
+#   PD:  substantia nigra (n=12 vs 8)
+#   AD:  entorhinal cortex (n=11 vs 7)
+# ============================================================
+
+tissue_comparisons <- list(
+  ALS = "Cervical spinal cord",
+  PD  = "Substantia nigra",
+  AD  = "Entorhinal cortex"
+)
+
+cns_de_results <- list()
+
+for(disease in names(tissue_comparisons)){
+
+  tissue <- tissue_comparisons[[disease]]
+
+  cat("\n--- CNS DE:", disease, "-", tissue, "---\n")
+
+  try({
+
+    tissue_meta <- pdata %>%
+      filter(source_name_ch1 == tissue,
+             Group %in% c("Control", "Disease"))
+
+    cat("Disease:", sum(tissue_meta$Group == "Disease"), "\n")
+    cat("Control:", sum(tissue_meta$Group == "Control"), "\n")
+
+    tissue_samples <- rownames(tissue_meta)
+    tissue_expr <- expr_cns_norm[,
+      colnames(expr_cns_norm) %in% tissue_samples]
+
+    tissue_meta <- tissue_meta[
+      match(colnames(tissue_expr), rownames(tissue_meta)),
+    ]
+
+    stopifnot(
+      identical(colnames(tissue_expr), rownames(tissue_meta))
+    )
+
+    group  <- factor(tissue_meta$Group,
+                     levels = c("Control", "Disease"))
+    design <- model.matrix(~ group)
+    fit    <- lmFit(tissue_expr, design)
+    fit    <- eBayes(fit)
+
+    res       <- topTable(fit, coef = 2,
+                          number = Inf, adjust.method = "BH")
+    res$probe <- rownames(res)
+
+    # map probes to gene symbols
+    res <- res %>%
+      left_join(probe_to_symbol, by = c("probe" = "ID")) %>%
+      dplyr::rename(gene = SYMBOL) %>%
+      filter(!is.na(gene) & gene != "") %>%
+      group_by(gene) %>%
+      slice_min(order_by = adj.P.Val,
+                n = 1, with_ties = FALSE) %>%
+      ungroup()
+
+    sig <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+    cat("Significant genes:", sig, "\n")
+
+    res$disease <- disease
+    res$tissue  <- tissue
+
+    cns_de_results[[disease]] <- res
+
+    write.csv(
+      res %>% dplyr::select(gene, logFC, P.Value,
+                             adj.P.Val, disease, tissue),
+      paste0("CNS_Data/DE_Results/", disease, "_CNS_DE.csv"),
+      row.names = FALSE
+    )
+
+    cat("Saved:", disease, "CNS DE\n")
+  })
+}
+```
+
+```{r gse122649_als_motor_cortex}
+# ============================================================
+# GSE122649 — ALS MOTOR CORTEX RNA-SEQ
+# n = 13 ALS vs 6 controls (after averaging technical replicates)
+# Processed separately from GSE26927
+# ============================================================
+
+cat("\n--- GSE122649 ALS Motor Cortex ---\n")
+
+count_files <- list.files(
+  "GSE122649/counts",
+  pattern    = "_counts.txt.gz",
+  full.names = TRUE
+)
+
+cat("Count files found:", length(count_files), "\n")
+
+# read and merge count files
+counts_list <- lapply(count_files, function(f){
+  df <- read.delim(gzfile(f), header = FALSE,
+                   col.names = c("gene", "count"),
+                   stringsAsFactors = FALSE)
+  df <- df[-1, ]  # remove file path header
+  df <- df[!grepl("^__", df$gene), ]  # remove HTSeq rows
+  df$count <- as.integer(df$count)
+  sample_name <- gsub(".*/(GSM[0-9]+)_.*", "\\1", f)
+  result <- data.frame(gene = df$gene, count = df$count,
+                       stringsAsFactors = FALSE)
+  colnames(result)[2] <- sample_name
+  result
+})
+
+counts_122649 <- counts_list[[1]][, "gene", drop = FALSE]
+for(i in seq_along(counts_list)){
+  counts_122649 <- merge(counts_122649, counts_list[[i]],
+                          by = "gene", all = TRUE)
+}
+
+rownames(counts_122649) <- counts_122649$gene
+counts_122649 <- counts_122649[, -1]
+counts_122649 <- as.matrix(counts_122649)
+mode(counts_122649) <- "integer"
+
+cat("Counts matrix:", dim(counts_122649), "\n")
+
+# build metadata — average technical replicates
+files <- list.files("GSE122649/counts",
+                     pattern = "_counts.txt.gz")
+
+meta_122649 <- data.frame(
+  Sample_ID = gsub("(GSM[0-9]+)_.*", "\\1", files),
+  Group     = ifelse(grepl("Co-", files), "Control", "ALS"),
+  Patient   = gsub("GSM[0-9]+_(ALS|Co)-([0-9]+)_.*",
+                   "\\1\\2", files),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    Patient_base = case_when(
+      Group == "ALS" ~ paste0("ALS_",
+        ceiling(match(Patient,
+          unique(Patient[Group == "ALS"])) / 2)),
+      Group == "Control" ~ paste0("Co_",
+        ceiling(match(Patient,
+          unique(Patient[Group == "Control"])) / 2))
+    )
+  )
+
+# average replicates per patient
+patient_ids <- unique(meta_122649$Patient_base)
+
+counts_averaged <- sapply(patient_ids, function(pid){
+  samples <- meta_122649$Sample_ID[
+    meta_122649$Patient_base == pid]
+  if(length(samples) == 1) return(counts_122649[, samples])
+  rowMeans(counts_122649[, samples])
+})
+
+counts_averaged <- round(counts_averaged)
+mode(counts_averaged) <- "integer"
+
+meta_avg <- data.frame(
+  Sample_ID = colnames(counts_averaged),
+  Group     = ifelse(grepl("^ALS", colnames(counts_averaged)),
+                     "ALS", "Control"),
+  stringsAsFactors = FALSE
+)
+
+cat("After averaging — ALS:", sum(meta_avg$Group == "ALS"),
+    "| Control:", sum(meta_avg$Group == "Control"), "\n")
+
+# DESeq2
+keep <- rowSums(counts_averaged >= 10) >= 3
+counts_filt <- counts_averaged[keep, ]
+
+dds_122649 <- DESeqDataSetFromMatrix(
+  countData = counts_filt,
+  colData   = meta_avg,
+  design    = ~ Group
+)
+dds_122649$Group <- factor(dds_122649$Group,
+                            levels = c("Control", "ALS"))
+dds_122649 <- DESeq(dds_122649)
+
+res_122649 <- results(
+  dds_122649,
+  contrast = c("Group", "ALS", "Control"),
+  alpha    = 0.05
+)
+
+res_df_122649 <- as.data.frame(res_122649)
+res_df_122649$gene <- rownames(res_df_122649)
+
+sig <- sum(res_df_122649$padj < 0.05, na.rm = TRUE)
+cat("Significant genes (ALS motor cortex):", sig, "\n")
+
+write.csv(
+  data.frame(
+    gene   = res_df_122649$gene,
+    logFC  = res_df_122649$log2FoldChange,
+    pvalue = res_df_122649$pvalue,
+    padj   = res_df_122649$padj,
+    stringsAsFactors = FALSE
+  ),
+  "CNS_Data/DE_Results/ALS_motorcortex_GSE122649_DE.csv",
+  row.names = FALSE
+)
+
+cat("Saved GSE122649 motor cortex DE results\n")
+```
+
+```{r muscle_vs_cns_comparison}
+# ============================================================
+# MUSCLE VS CNS COMPARISON
+# For each candidate gene, check:
+#   - Significant in muscle? (padj < 0.05)
+#   - Significant in CNS? (padj < 0.05)
+#   - Direction concordant?
+# 60 gene-tissue comparisons total (20 genes x 3 CNS tissues)
+# ============================================================
+
+# load muscle DE results
+als_muscle <- read.csv("DE_Results/GSE3307_DE_results.csv",
+                        stringsAsFactors = FALSE)
+pd_muscle  <- read.csv("DE_Results/GSE140089_DE_results.csv",
+                        stringsAsFactors = FALSE)
+
+# load CNS DE results
+als_cns_26927  <- read.csv(
+  "CNS_Data/DE_Results/ALS_CNS_DE.csv",
+  stringsAsFactors = FALSE)
+pd_cns_26927   <- read.csv(
+  "CNS_Data/DE_Results/PD_CNS_DE.csv",
+  stringsAsFactors = FALSE)
+als_cns_122649 <- read.csv(
+  "CNS_Data/DE_Results/ALS_motorcortex_GSE122649_DE.csv",
+  stringsAsFactors = FALSE)
+
+# build comparison table
+comparison_rows <- list()
+
+for(gene in all_candidates){
+
+  als_m  <- als_muscle    %>% filter(gene == !!gene)
+  als_c1 <- als_cns_26927 %>% filter(gene == !!gene)
+  als_c2 <- als_cns_122649 %>% filter(gene == !!gene)
+  pd_m   <- pd_muscle     %>% filter(gene == !!gene)
+  pd_c   <- pd_cns_26927  %>% filter(gene == !!gene)
+
+  comparison_rows[[paste("ALS_spinalcord", gene)]] <- data.frame(
+    gene          = gene,
+    disease       = "ALS",
+    cns_source    = "Spinal cord (GSE26927)",
+    muscle_sig    = if(nrow(als_m)  > 0)
+                      als_m$padj[1]       < 0.05 else FALSE,
+    muscle_log2FC = if(nrow(als_m)  > 0)
+                      als_m$log2FC[1]     else NA,
+    cns_sig       = if(nrow(als_c1) > 0)
+                      als_c1$adj.P.Val[1] < 0.05 else FALSE,
+    cns_log2FC    = if(nrow(als_c1) > 0)
+                      als_c1$logFC[1]     else NA,
+    stringsAsFactors = FALSE
+  )
+
+  comparison_rows[[paste("ALS_motorcortex", gene)]] <- data.frame(
+    gene          = gene,
+    disease       = "ALS",
+    cns_source    = "Motor cortex (GSE122649)",
+    muscle_sig    = if(nrow(als_m)  > 0)
+                      als_m$padj[1]    < 0.05 else FALSE,
+    muscle_log2FC = if(nrow(als_m)  > 0)
+                      als_m$log2FC[1]  else NA,
+    cns_sig       = if(nrow(als_c2) > 0)
+                      als_c2$padj[1]   < 0.05 else FALSE,
+    cns_log2FC    = if(nrow(als_c2) > 0)
+                      als_c2$logFC[1]  else NA,
+    stringsAsFactors = FALSE
+  )
+
+  comparison_rows[[paste("PD_substantianigra", gene)]] <- data.frame(
+    gene          = gene,
+    disease       = "PD",
+    cns_source    = "Substantia nigra (GSE26927)",
+    muscle_sig    = if(nrow(pd_m) > 0)
+                      pd_m$padj[1]      < 0.05 else FALSE,
+    muscle_log2FC = if(nrow(pd_m) > 0)
+                      pd_m$log2FC[1]    else NA,
+    cns_sig       = if(nrow(pd_c) > 0)
+                      pd_c$adj.P.Val[1] < 0.05 else FALSE,
+    cns_log2FC    = if(nrow(pd_c) > 0)
+                      pd_c$logFC[1]     else NA,
+    stringsAsFactors = FALSE
+  )
+}
+
+comparison_table <- bind_rows(comparison_rows) %>%
+  mutate(
+    muscle_dir = case_when(
+      muscle_sig & muscle_log2FC > 0 ~ "Up",
+      muscle_sig & muscle_log2FC < 0 ~ "Down",
+      TRUE ~ "NS"
+    ),
+    cns_dir = case_when(
+      cns_sig & cns_log2FC > 0 ~ "Up",
+      cns_sig & cns_log2FC < 0 ~ "Down",
+      TRUE ~ "NS"
+    ),
+    pattern = case_when(
+      muscle_sig & cns_sig & muscle_dir == cns_dir ~
+        "Shared same direction",
+      muscle_sig & cns_sig & muscle_dir != cns_dir ~
+        "Shared opposite direction",
+      muscle_sig & !cns_sig  ~ "Muscle-specific",
+      !muscle_sig & cns_sig  ~ "CNS-specific",
+      TRUE ~ "Not significant in either"
+    )
+  )
+
+cat("\n=== MUSCLE VS CNS PATTERN SUMMARY ===\n")
+print(table(comparison_table$cns_source,
+            comparison_table$pattern))
+
+cat("\nTotal comparisons:", nrow(comparison_table), "\n")
+cat("Muscle-specific:",
+    sum(comparison_table$pattern == "Muscle-specific"), "\n")
+cat("Shared opposite direction:",
+    sum(comparison_table$pattern == "Shared opposite direction"),
+    "\n")
+
+write.csv(
+  comparison_table,
+  "CNS_Data/Muscle_vs_CNS_comparison_final.csv",
+  row.names = FALSE
+)
+
+cat("\nComparison saved to CNS_Data/\n")
+```
